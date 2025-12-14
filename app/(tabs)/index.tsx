@@ -7,7 +7,7 @@ import {
   ScrollView,
   TouchableOpacity,
   StatusBar,
-  ActivityIndicator, 
+  ActivityIndicator,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as MediaLibrary from "expo-media-library";
@@ -23,8 +23,9 @@ import {
   MD3DarkTheme,
 } from "react-native-paper";
 import { useFocusEffect } from "expo-router";
-import { recognizePlate } from "../../services/ocr";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { recognizePlate } from "../../services/ocr";
 import {
   initDB,
   insertImage,
@@ -44,6 +45,8 @@ const darkTheme = {
 };
 
 export default function CameraScreen() {
+  const insets = useSafeAreaInsets();
+
   const [permission, requestPermission] = useCameraPermissions({
     request: false,
   });
@@ -94,9 +97,7 @@ export default function CameraScreen() {
         if (photoData?.uri) {
           setPhotoUri(photoData.uri);
           setModalVisible(true);
-
           performOCR(photoData.uri);
-
           loadPlates();
         }
       } catch (error) {
@@ -110,7 +111,6 @@ export default function CameraScreen() {
     setNewPlate("");
     try {
       const detectedText = await recognizePlate(uri);
-
       if (detectedText) {
         setNewPlate(detectedText);
       }
@@ -124,19 +124,15 @@ export default function CameraScreen() {
   const saveFinalPhoto = async (plateNumber: string, isMainPlate: boolean) => {
     if (!photoUri) return;
     setIsSaving(true);
-
     try {
       const asset = await MediaLibrary.createAssetAsync(photoUri);
-
       const category = isMainPlate ? "Patente Principal" : "Detalle Auto";
-
       await insertImage(
         asset.uri,
         asset.id,
         category,
         plateNumber.toUpperCase()
       );
-
       setModalVisible(false);
       setPhotoUri(null);
       setNewPlate("");
@@ -162,19 +158,26 @@ export default function CameraScreen() {
               style={StyleSheet.absoluteFillObject}
               facing="back"
               ref={cameraRef}
+              mode="picture"
+              autofocus="on"
+              zoom={0}
             />
 
-            
             <View style={styles.overlayUI}>
-              <View style={styles.buttonContainer}>
+              <View
+                style={[
+                  styles.buttonContainer,
+                  { paddingBottom: insets.bottom + 20 },
+                ]}
+              >
                 <Button
                   mode="contained"
-                  icon="camera"
+                  // icon="camera"
                   onPress={takePicture}
                   buttonColor="#6a7ff8ff"
                   textColor="white"
-                  contentStyle={{ height: 70, width: 70 }}
-                  style={{ borderRadius: 50, justifyContent: "center" }}
+                  contentStyle={{ height: 80, width: 80 }}
+                  style={styles.cameraButton}
                 >
                   {""}
                 </Button>
@@ -194,7 +197,12 @@ export default function CameraScreen() {
           onRequestClose={() => setModalVisible(false)}
         >
           <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
+            <View
+              style={[
+                styles.modalContent,
+                { paddingBottom: insets.bottom + 20 },
+              ]}
+            >
               <Title
                 style={{
                   textAlign: "center",
@@ -232,10 +240,7 @@ export default function CameraScreen() {
                           label={isProcessingOCR ? "Leyendo..." : "Patente"}
                           value={newPlate}
                           onChangeText={setNewPlate}
-                          style={{
-                            height: 45,
-                            backgroundColor: "#2C2C2C",
-                          }}
+                          style={{ height: 45, backgroundColor: "#2C2C2C" }}
                           textColor="white"
                           disabled={isProcessingOCR}
                           right={
@@ -255,7 +260,6 @@ export default function CameraScreen() {
                           }}
                         />
                       </View>
-
                       <IconButton
                         icon="check-circle"
                         iconColor="#03DAC6"
@@ -348,11 +352,17 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "transparent",
     justifyContent: "flex-end",
+    alignItems: "center", 
   },
   buttonContainer: {
-    padding: 30,
+    padding: 20,
+  },
+  cameraButton: {
+    borderRadius: 50,
+    justifyContent: "center",
     alignItems: "center",
-    marginBottom: 20,
+    borderWidth: 4,
+    borderColor: "rgba(255,255,255,0.3)",
   },
   previewContainer: {
     flex: 1,
@@ -360,7 +370,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   preview: { width: "100%", height: "100%", opacity: 0.3 },
-
   modalOverlay: {
     flex: 1,
     justifyContent: "flex-end",
