@@ -111,9 +111,6 @@ export default function GalleryScreen() {
     setFolderModalVisible(true);
   };
 
-  // =========================================================
-  // HELPER: Convertir imagen a Base64 de forma SEGURA
-  // =========================================================
   const getCleanBase64 = async (uri: string) => {
     try {
       let cleanUri = decodeURIComponent(uri);
@@ -138,9 +135,6 @@ export default function GalleryScreen() {
     }
   };
 
-  // =========================================================
-  // MÉTODO 1: PDF (Optimizado para memoria secuencial)
-  // =========================================================
   const generateAndSharePDF = async (
     plate: string,
     photosToShare: ImageRecord[],
@@ -219,9 +213,6 @@ export default function GalleryScreen() {
     }
   };
 
-  // =========================================================
-  // MÉTODO 2: PACK IMÁGENES (WhatsApp/Telegram)
-  // =========================================================
   const shareImagesPack = async (photosToShare: ImageRecord[]) => {
     try {
       setIsExporting(true);
@@ -466,9 +457,6 @@ export default function GalleryScreen() {
     setSelectedPhotoIds(new Set(photos.map((p) => p.id)));
   };
 
-  // =========================================================
-  // MÉTODO 3: COMPARTIR INDIVIDUAL (Restaurado a Expo Sharing)
-  // =========================================================
   const shareSingleImage = async () => {
     const currentPhoto = photos[selectedIndex];
     if (currentPhoto && (await Sharing.isAvailableAsync())) {
