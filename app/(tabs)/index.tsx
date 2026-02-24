@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import {
   StyleSheet,
   View,
@@ -7,9 +7,9 @@ import {
   ScrollView,
   TouchableOpacity,
   StatusBar,
-  ActivityIndicator,
+  Alert,
 } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import * as ImagePicker from "expo-image-picker";
 import * as MediaLibrary from "expo-media-library";
 import {
   Button,
@@ -21,10 +21,12 @@ import {
   Provider as PaperProvider,
   IconButton,
   MD3DarkTheme,
+  ActivityIndicator,
 } from "react-native-paper";
 import { useFocusEffect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+// Asegúrate de que estas rutas sean correctas en tu proyecto
 import { recognizePlate } from "../../services/ocr";
 import {
   initDB,
@@ -44,27 +46,26 @@ const darkTheme = {
   },
 };
 
-export default function CameraScreen() {
+export default function InputScreen() {
   const insets = useSafeAreaInsets();
 
-  const [permission, requestPermission] = useCameraPermissions({
-    request: false,
-  });
-  const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions(
-    { writeOnly: true }
-  );
+  // --- PERMISOS ---
+  const [mediaPermission, requestMediaPermission] =
+    MediaLibrary.usePermissions();
+  const [cameraPermission, requestCameraPermission] =
+    ImagePicker.useCameraPermissions();
 
-  const cameraRef = useRef<CameraView>(null);
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
-
+  // --- ESTADOS ---
+  const [selectedUris, setSelectedUris] = useState<string[]>([]); // Array para manejar múltiples fotos
   const [modalVisible, setModalVisible] = useState(false);
   const [newPlate, setNewPlate] = useState("");
-
   const [recentPlates, setRecentPlates] = useState<FolderPreview[]>([]);
-  const [isSaving, setIsSaving] = useState(false);
 
+  // Estados de carga
+  const [isSaving, setIsSaving] = useState(false);
   const [isProcessingOCR, setIsProcessingOCR] = useState(false);
 
+  // --- CICLO DE VIDA ---
   useEffect(() => {
     initDB();
   }, []);
@@ -72,7 +73,7 @@ export default function CameraScreen() {
   useFocusEffect(
     useCallback(() => {
       loadPlates();
-    }, [])
+    }, []),
   );
 
   const loadPlates = async () => {
@@ -80,32 +81,56 @@ export default function CameraScreen() {
     setRecentPlates(plates);
   };
 
-  useEffect(() => {
-    (async () => {
-      if (!permission?.granted) await requestPermission();
-      if (!mediaPermission?.granted) await requestMediaPermission();
-    })();
-  }, []);
+  const checkPermissions = async () => {
+    if (!cameraPermission?.granted) await requestCameraPermission();
+    if (!mediaPermission?.granted) await requestMediaPermission();
+  };
 
-  const takePicture = async () => {
-    if (cameraRef.current) {
-      try {
-        const photoData = await cameraRef.current.takePictureAsync({
-          quality: 1,
-          skipProcessing: true,
-        });
-        if (photoData?.uri) {
-          setPhotoUri(photoData.uri);
-          setModalVisible(true);
-          performOCR(photoData.uri);
-          loadPlates();
-        }
-      } catch (error) {
-        console.log("Error foto:", error);
+  // --- FUNCIONES PRINCIPALES ---
+
+  // 1. ABRIR CÁMARA NATIVA (Mejor calidad y Zoom)
+  const openNativeCamera = async () => {
+    await checkPermissions();
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 1, // Calidad máxima para el S25 Ultra
+      exif: true,
+      allowsEditing: false, // Dejar false para mantener la foto original completa
+    });
+
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const uri = result.assets[0].uri;
+      setSelectedUris([uri]); // Guardamos en array aunque sea una sola
+      setModalVisible(true);
+      performOCR(uri); // Intentamos leer patente automáticamente
+    }
+  };
+
+  // 2. ABRIR GALERÍA (Importación múltiple)
+  const openGallery = async () => {
+    await checkPermissions();
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsMultipleSelection: true, // ¡Clave para importar carpetas!
+      quality: 1,
+      orderedSelection: true,
+    });
+
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const uris = result.assets.map((asset) => asset.uri);
+      setSelectedUris(uris);
+      setModalVisible(true);
+
+      // Si seleccionó solo una, intentamos OCR. Si son muchas, mejor que escriba manual.
+      if (uris.length === 1) {
+        performOCR(uris[0]);
+      } else {
+        setNewPlate(""); // Limpiamos para evitar confusiones
       }
     }
   };
 
+  // --- LÓGICA DE OCR ---
   const performOCR = async (uri: string) => {
     setIsProcessingOCR(true);
     setNewPlate("");
@@ -121,75 +146,123 @@ export default function CameraScreen() {
     }
   };
 
-  const saveFinalPhoto = async (plateNumber: string, isMainPlate: boolean) => {
-    if (!photoUri) return;
+  // --- GUARDADO ---
+  const savePhotos = async (plateNumber: string, isMainPlate: boolean) => {
+    if (selectedUris.length === 0) return;
+    if (!plateNumber || plateNumber.length < 3) {
+      Alert.alert("Error", "La patente debe tener al menos 3 caracteres.");
+      return;
+    }
+
     setIsSaving(true);
+    const cleanPlate = plateNumber.toUpperCase().trim();
+
     try {
-      const asset = await MediaLibrary.createAssetAsync(photoUri);
-      const category = isMainPlate ? "Patente Principal" : "Detalle Auto";
-      await insertImage(
-        asset.uri,
-        asset.id,
-        category,
-        plateNumber.toUpperCase()
-      );
+      let savedCount = 0;
+
+      // Iteramos sobre todas las fotos seleccionadas
+      for (const uri of selectedUris) {
+        // 1. Crear asset en la galería del sistema (OrganizadorPatente)
+        // Nota: createAssetAsync mueve el archivo a la galería de DCIM/Pictures
+        const asset = await MediaLibrary.createAssetAsync(uri);
+
+        try {
+          const album = await MediaLibrary.getAlbumAsync(cleanPlate);
+          if (album === null) {
+            // Primer foto de esta patente: crea el álbum
+            await MediaLibrary.createAlbumAsync(cleanPlate, asset, false);
+          } else {
+            // El álbum ya existe: agrega la foto
+            await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+          }
+        } catch (albumError) {
+          // Si falla el álbum no bloqueamos el guardado en BD
+          console.warn("No se pudo crear/actualizar álbum:", albumError);
+        }
+        // 2. Determinar categoría
+        // Si es importación masiva, todas van como detalle salvo lógica específica.
+        // Aquí simplificamos: Si el usuario eligió "Nuevo Auto" y es UNA sola foto, es Principal.
+        // Si son varias, todas van como Detalle para no tener múltiples portadas, o puedes refinar esto.
+        let category = "Detalle Auto";
+        if (selectedUris.length === 1 && isMainPlate) {
+          category = "Patente Principal";
+        }
+
+        // 3. Insertar en BD
+        await insertImage(uri, asset.id, category, cleanPlate);
+        savedCount++;
+      }
+
+      // Éxito
       setModalVisible(false);
-      setPhotoUri(null);
+      setSelectedUris([]);
       setNewPlate("");
-      alert(`Guardado en: ${plateNumber.toUpperCase()}`);
+
+      // Feedback al usuario
+      if (savedCount === 1) {
+        Alert.alert("Guardado", `Foto asignada a: ${cleanPlate}`);
+      } else {
+        Alert.alert(
+          "Fotos guardadas",
+          `Se guardaron ${savedCount} fotos en ${cleanPlate}`,
+        );
+      }
+
+      loadPlates(); // Recargar lista de abajo
     } catch (e) {
-      alert("Error al guardar");
+      Alert.alert("Error", "Hubo un problema al guardar las imágenes.");
       console.log(e);
     } finally {
       setIsSaving(false);
     }
   };
 
-  if (!permission || !mediaPermission)
-    return <View style={{ backgroundColor: "#000", flex: 1 }} />;
-
+  // --- RENDER ---
   return (
     <PaperProvider theme={darkTheme}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
       <View style={styles.container}>
-        {!photoUri ? (
-          <View style={{ flex: 1 }}>
-            <CameraView
-              style={StyleSheet.absoluteFillObject}
-              facing="back"
-              ref={cameraRef}
-              mode="picture"
-              autofocus="on"
-              zoom={0}
-            />
+        {/* PANTALLA PRINCIPAL (HUB) */}
+        <View style={styles.menuContainer}>
+          <View style={{ marginBottom: 40, alignItems: "center" }}>
+            <Title style={styles.appTitle}>Organizador de Patentes</Title>
+            <Paragraph style={{ color: "#888" }}>
+              Selecciona el origen de las imágenes
+            </Paragraph>
+          </View>
 
-            <View style={styles.overlayUI}>
-              <View
-                style={[
-                  styles.buttonContainer,
-                  { paddingBottom: insets.bottom + 20 },
-                ]}
-              >
-                <Button
-                  mode="contained"
-                  // icon="camera"
-                  onPress={takePicture}
-                  buttonColor="#6a7ff8ff"
-                  textColor="white"
-                  contentStyle={{ height: 80, width: 80 }}
-                  style={styles.cameraButton}
-                >
-                  {""}
-                </Button>
+          <View style={styles.buttonsRow}>
+            {/* BOTÓN CÁMARA NATIVA */}
+            <TouchableOpacity
+              style={styles.bigButton}
+              onPress={openNativeCamera}
+              activeOpacity={0.8}
+            >
+              <View style={styles.iconCircle}>
+                <IconButton icon="camera" iconColor="white" size={40} />
               </View>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.previewContainer}>
-            <Image source={{ uri: photoUri }} style={styles.preview} />
-          </View>
-        )}
+              <Text style={styles.bigButtonText}>Cámara</Text>
+              <Text style={styles.bigButtonSub}>Nativa</Text>
+            </TouchableOpacity>
 
+            {/* BOTÓN GALERÍA */}
+            <TouchableOpacity
+              style={[styles.bigButton, styles.galleryButton]}
+              onPress={openGallery}
+              activeOpacity={0.8}
+            >
+              <View
+                style={[styles.iconCircle, { backgroundColor: "#485ec0ff" }]}
+              >
+                <IconButton icon="image-multiple" iconColor="white" size={40} />
+              </View>
+              <Text style={styles.bigButtonText}>Galería</Text>
+              <Text style={styles.bigButtonSub}>Importar Fotos</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* --- MODAL DE CLASIFICACIÓN --- */}
         <Modal
           animationType="slide"
           transparent={true}
@@ -203,33 +276,26 @@ export default function CameraScreen() {
                 { paddingBottom: insets.bottom + 20 },
               ]}
             >
-              <Title
-                style={{
-                  textAlign: "center",
-                  marginBottom: 10,
-                  color: "white",
-                }}
-              >
-                Organizar Foto
+              <Title style={styles.modalTitle}>
+                {selectedUris.length > 1
+                  ? `Guardar ${selectedUris.length} Fotos`
+                  : "Guardar Foto"}
               </Title>
-              <Image
-                source={{ uri: photoUri || "" }}
-                style={{
-                  width: 100,
-                  height: 100,
-                  alignSelf: "center",
-                  borderRadius: 8,
-                  marginBottom: 15,
-                  borderColor: "#333",
-                  borderWidth: 1,
-                }}
-              />
 
-              <ScrollView>
+              {/* Previsualización pequeña */}
+              {selectedUris.length > 0 && (
+                <Image
+                  source={{ uri: selectedUris[0] }}
+                  style={styles.miniPreview}
+                />
+              )}
+
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {/* OPCIÓN 1: NUEVA PATENTE */}
                 <Card style={styles.cardOption}>
                   <Card.Content>
                     <Paragraph style={{ color: "#aaa", marginBottom: 5 }}>
-                      Nuevo Auto
+                      Nueva Patente
                     </Paragraph>
                     <View
                       style={{ flexDirection: "row", alignItems: "center" }}
@@ -237,11 +303,12 @@ export default function CameraScreen() {
                       <View style={{ flex: 1 }}>
                         <TextInput
                           mode="outlined"
-                          label={isProcessingOCR ? "Leyendo..." : "Patente"}
+                          label={isProcessingOCR ? "Escaneando..." : "Patente"}
                           value={newPlate}
                           onChangeText={setNewPlate}
                           style={{ height: 45, backgroundColor: "#2C2C2C" }}
                           textColor="white"
+                          autoCapitalize="characters"
                           disabled={isProcessingOCR}
                           right={
                             isProcessingOCR ? (
@@ -265,58 +332,37 @@ export default function CameraScreen() {
                         iconColor="#03DAC6"
                         size={35}
                         disabled={newPlate.length < 3 || isSaving}
-                        onPress={() => saveFinalPhoto(newPlate, true)}
+                        onPress={() => savePhotos(newPlate, true)}
                       />
                     </View>
                   </Card.Content>
                 </Card>
 
-                <Text
-                  style={{
-                    textAlign: "center",
-                    marginVertical: 15,
-                    color: "#666",
-                  }}
-                >
-                  --- O asignar a existente ---
+                <Text style={styles.dividerText}>
+                  --- O asignar a carpeta existente ---
                 </Text>
 
+                {/* OPCIÓN 2: LISTA DE EXISTENTES */}
                 {recentPlates.map((item, index) => (
                   <TouchableOpacity
                     key={index}
-                    onPress={() => saveFinalPhoto(item.plate, false)}
+                    onPress={() => savePhotos(item.plate, false)}
                     disabled={isSaving}
                   >
                     <Card style={styles.cardPlate}>
-                      <Card.Content
-                        style={{
-                          flexDirection: "row",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
-                        <View
-                          style={{
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 10,
-                          }}
-                        >
+                      <Card.Content style={styles.cardPlateContent}>
+                        <View style={styles.plateInfo}>
                           <Image
                             source={{ uri: item.coverUri }}
-                            style={{
-                              width: 40,
-                              height: 40,
-                              borderRadius: 5,
-                              backgroundColor: "#333",
-                            }}
+                            style={styles.plateThumb}
                           />
                           <View>
                             <Title style={{ color: "#6480fdff" }}>
                               {item.plate}
                             </Title>
                             <Paragraph style={{ color: "#aaa", fontSize: 10 }}>
-                              Agregar detalle
+                              Agregar{" "}
+                              {selectedUris.length > 1 ? "fotos" : "foto"}
                             </Paragraph>
                           </View>
                         </View>
@@ -332,11 +378,12 @@ export default function CameraScreen() {
                 textColor="#FF5252"
                 onPress={() => {
                   setModalVisible(false);
-                  setPhotoUri(null);
+                  setSelectedUris([]);
+                  setNewPlate("");
                 }}
                 style={{ marginTop: 15, borderColor: "#FF5252" }}
               >
-                Descartar Foto
+                Descartar / Cancelar
               </Button>
             </View>
           </View>
@@ -348,47 +395,115 @@ export default function CameraScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "black" },
-  overlayUI: {
+
+  // Estilos del Menú Principal
+  menuContainer: {
     flex: 1,
-    backgroundColor: "transparent",
-    justifyContent: "flex-end",
-    alignItems: "center", 
-  },
-  buttonContainer: {
+    justifyContent: "center",
     padding: 20,
   },
-  cameraButton: {
-    borderRadius: 50,
+  appTitle: {
+    fontSize: 32,
+    fontWeight: "bold",
+    color: "white",
+    textAlign: "center",
+  },
+  buttonsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 15,
+  },
+  bigButton: {
+    flex: 1,
+    height: 160,
+    backgroundColor: "#1E1E1E",
+    borderRadius: 20,
     justifyContent: "center",
     alignItems: "center",
-    borderWidth: 4,
-    borderColor: "rgba(255,255,255,0.3)",
+    borderWidth: 1,
+    borderColor: "#333",
+    elevation: 5,
   },
-  previewContainer: {
-    flex: 1,
-    backgroundColor: "black",
+  galleryButton: {
+    backgroundColor: "#1A1A1A",
+  },
+  iconCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "#333",
     justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 10,
   },
-  preview: { width: "100%", height: "100%", opacity: 0.3 },
+  bigButtonText: {
+    color: "white",
+    fontSize: 18,
+    fontWeight: "bold",
+  },
+  bigButtonSub: {
+    color: "#888",
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  // Estilos Modal
   modalOverlay: {
     flex: 1,
     justifyContent: "flex-end",
-    backgroundColor: "rgba(0,0,0,0.8)",
+    backgroundColor: "rgba(0,0,0,0.85)",
   },
   modalContent: {
     backgroundColor: "#1E1E1E",
     borderTopLeftRadius: 25,
     borderTopRightRadius: 25,
     padding: 20,
-    maxHeight: "85%",
+    maxHeight: "90%",
     borderColor: "#333",
     borderWidth: 1,
   },
+  modalTitle: {
+    textAlign: "center",
+    marginBottom: 10,
+    color: "white",
+    fontWeight: "bold",
+  },
+  miniPreview: {
+    width: 100,
+    height: 100,
+    alignSelf: "center",
+    borderRadius: 10,
+    marginBottom: 20,
+    borderColor: "#444",
+    borderWidth: 1,
+  },
   cardOption: { marginBottom: 10, backgroundColor: "#2C2C2C" },
+  dividerText: {
+    textAlign: "center",
+    marginVertical: 15,
+    color: "#666",
+    fontSize: 12,
+  },
   cardPlate: {
     marginBottom: 8,
     backgroundColor: "#121212",
     borderColor: "#333",
     borderWidth: 1,
+  },
+  cardPlateContent: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  plateInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  plateThumb: {
+    width: 40,
+    height: 40,
+    borderRadius: 5,
+    backgroundColor: "#333",
   },
 });
